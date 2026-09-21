@@ -57,16 +57,50 @@ impl YtMusic {
             .await
     }
 
+    /// The proof-of-origin token the signed-in client sends, bound to this session rather
+    /// than to one track, which is what YouTube expects from `WEB_REMIX`. Empty when the
+    /// binding cannot be worked out: a token for the wrong identity is worse than none.
+    async fn po_token(&self) -> String {
+        let Some(binding) = self.session_binding().await else {
+            log::warn!("potoken: no session binding, the stream goes out without a token");
+            return String::new();
+        };
+        self.po_tokens.token(&binding).await
+    }
+
+    /// The stream to play `video_id` from.
+    ///
+    /// The guest client is asked first because its urls need no deciphering, and the url it
+    /// hands back is checked before a track commits to it: a player response can name a
+    /// stream the host then refuses, which is what an address YouTube has flagged looks like.
+    /// Either failure falls through to the signed-in client, whose url carries a
+    /// proof-of-origin token. That path works for a guest too, so a run without an account
+    /// still gets the second try.
     pub async fn best_audio(&self, video_id: &str) -> Result<AudioFormat> {
-        match self.guest_audio(video_id).await {
-            Ok(format) => Ok(format),
-            Err(guest) if self.is_authenticated() => {
-                log::debug!("player: the guest stream for {video_id} failed ({guest:#})");
-                self.signed_audio(video_id)
-                    .await
-                    .with_context(|| format!("the guest stream failed too ({guest:#})"))
+        let refused = match self.guest_audio(video_id).await {
+            Ok(format) => match self.serves(&format).await {
+                true => return Ok(format),
+                false => anyhow::anyhow!("the stream host refused the guest url"),
+            },
+            Err(error) => error,
+        };
+        log::debug!("player: the guest stream for {video_id} failed ({refused:#})");
+        self.signed_audio(video_id)
+            .await
+            .with_context(|| format!("the guest stream failed too ({refused:#})"))
+    }
+
+    /// Whether the stream host will serve this url, asked with the smallest range there is.
+    async fn serves(&self, format: &AudioFormat) -> bool {
+        match range(&self.http, &format.url, format.user_agent, 0, 0).await {
+            Ok(_) => true,
+            Err(error) => {
+                log::debug!(
+                    "player: itag {} is not being served: {error:#}",
+                    format.itag
+                );
+                false
             }
-            Err(guest) => Err(guest),
         }
     }
 
@@ -99,11 +133,13 @@ impl YtMusic {
             solver.id(),
             solver.sts()
         );
+        let token = self.po_token().await;
         let payload = json!({
             "videoId": video_id,
             "contentCheckOk": true,
             "racyCheckOk": true,
             "cpn": random_string(16),
+            "serviceIntegrityDimensions": { "poToken": token },
             "playbackContext": {
                 "contentPlaybackContext": {
                     "html5Preference": "HTML5_PREF_WANTS",
@@ -122,7 +158,7 @@ impl YtMusic {
         let url = decipher(&solver, &chosen).await?;
         Ok(AudioFormat {
             itag: chosen.itag,
-            url,
+            url: with_pot(&url, &token),
             mime: chosen.mime,
             codec: chosen.codec,
             bitrate: chosen.bitrate,
@@ -237,7 +273,7 @@ async fn range(
     if !status.is_success() {
         bail!(
             "stream host refused the download with status {status} \
-             (a proof-of-origin token is likely required)"
+             (the proof-of-origin token it carried was not accepted)"
         );
     }
     let chunk = response.bytes().await.context("cannot read stream chunk")?;
@@ -329,6 +365,21 @@ async fn decipher(solver: &crate::deobf::Solver, format: &Ciphered) -> Result<St
     }
     set_params(&mut url, &changes);
     Ok(url.to_string())
+}
+
+/// Adds the proof-of-origin parameter the stream host asks for, leaving a url that already
+/// carries one alone. An empty token, or a url that does not parse, is handed back untouched,
+/// so a token can never be the reason a stream fails to load.
+fn with_pot(url: &str, token: &str) -> String {
+    if token.is_empty() {
+        return url.to_string();
+    }
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        log::warn!("potoken: the stream url does not parse, sending it without a token");
+        return url.to_string();
+    };
+    set_params(&mut parsed, &[("pot", token)]);
+    parsed.to_string()
 }
 
 fn param(url: &reqwest::Url, key: &str) -> Option<String> {

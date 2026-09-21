@@ -14,6 +14,8 @@ use crate::context::Client;
 const API_BASE: &str = "https://www.youtube.com/youtubei/v1/";
 const MUSIC_API_BASE: &str = "https://music.youtube.com/youtubei/v1/";
 const VISITOR_URL: &str = "https://www.youtube.com/sw.js_data";
+/// Where the signed-in account's data sync id is published.
+const HOME_URL: &str = "https://www.youtube.com/";
 /// The url a pasted cookie is stored against. A `youtube.com` domain cookie stored here
 /// also matches `www.youtube.com`.
 const COOKIE_ORIGIN: &str = "https://music.youtube.com/";
@@ -33,6 +35,10 @@ pub struct YtMusic {
     authuser: usize,
     page_id: Option<String>,
     pub(crate) resolve_cache: crate::dedup::ResolveCache,
+    pub(crate) po_tokens: crate::potoken::PoTokens,
+    /// The account's data sync id, once it has been looked for. The inner `None` records a
+    /// look that found nothing, so a signed-in run asks Google for it exactly once.
+    data_sync: RwLock<Option<Option<String>>>,
     hl: String,
     gl: String,
 }
@@ -75,6 +81,8 @@ impl YtMusic {
             authuser: 0,
             page_id: None,
             resolve_cache: crate::dedup::ResolveCache::memory(),
+            po_tokens: crate::potoken::PoTokens::default(),
+            data_sync: RwLock::new(None),
             hl: "en".to_string(),
             gl: "US".to_string(),
         }
@@ -97,6 +105,14 @@ impl YtMusic {
 
     pub fn cache_player(mut self, path: PathBuf) -> Self {
         self.player_cache = Some(path);
+        self
+    }
+
+    /// Mints proof-of-origin tokens through `minter`, a host that has a browser to run
+    /// BotGuard in. Without one the client still sends cold start tokens, which only cover
+    /// the start of a stream.
+    pub fn mint_po_tokens(mut self, minter: Arc<dyn crate::potoken::Minter>) -> Self {
+        self.po_tokens = crate::potoken::PoTokens::new(Some(minter));
         self
     }
 
@@ -287,6 +303,38 @@ impl YtMusic {
         *self.visitor.write().await = Some(issued);
     }
 
+    /// What a proof-of-origin token for this session is bound to: the account's data sync id
+    /// when the cookies name one, and the visitor id otherwise. YouTube refuses a token bound
+    /// to anything else, so a signed-in run that cannot read its data sync id sends nothing
+    /// rather than a token for the wrong identity.
+    pub(crate) async fn session_binding(&self) -> Option<String> {
+        match self.is_authenticated() {
+            true => self.data_sync_id().await,
+            false => Some(self.visitor().await).filter(|visitor| !visitor.is_empty()),
+        }
+    }
+
+    /// The account's data sync id, read once out of the signed-in home page and kept for the
+    /// life of the client. It changes only when the account does, and a client signs in once.
+    async fn data_sync_id(&self) -> Option<String> {
+        if let Some(ready) = self.data_sync.read().await.clone() {
+            return ready;
+        }
+        let mut slot = self.data_sync.write().await;
+        if let Some(ready) = slot.clone() {
+            return ready;
+        }
+        let found = match fetch_data_sync_id(self).await {
+            Ok(found) => Some(found),
+            Err(error) => {
+                log::warn!("ytmusic: cannot read the data sync id: {error:#}");
+                None
+            }
+        };
+        *slot = Some(found.clone());
+        found
+    }
+
     pub fn lang(&self) -> &str {
         &self.hl
     }
@@ -313,6 +361,32 @@ async fn fetch_visitor(http: &reqwest::Client) -> Result<String> {
         .context("the visitor response carries no visitor id")?;
     log::debug!("ytmusic: adopted a server-issued visitor id");
     Ok(issued)
+}
+
+/// Reads `DATASYNC_ID` off the signed-in home page, which is the only place Google publishes
+/// it. A brand account carries it as `delegated||user`; both halves belong to the binding, so
+/// the value is taken whole.
+async fn fetch_data_sync_id(api: &YtMusic) -> Result<String> {
+    let authed = api
+        .authed
+        .as_ref()
+        .context("the session is not signed in")?;
+    let body = authed
+        .http
+        .get(HOME_URL)
+        .header("User-Agent", Client::Music.user_agent())
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .send()
+        .await
+        .context("cannot reach the home page")?
+        .text()
+        .await
+        .context("cannot read the home page")?;
+    regex_lite::Regex::new(r#""DATASYNC_ID"\s*:\s*"([^"]+)""#)?
+        .captures(&body)
+        .and_then(|found| found.get(1))
+        .map(|found| found.as_str().to_string())
+        .context("the home page carries no data sync id")
 }
 
 impl Authed {
