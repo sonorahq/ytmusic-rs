@@ -25,6 +25,12 @@ const SEEDED: &str = "Domain=youtube.com; Path=/; Secure; Max-Age=34560000";
 /// Attributes for a `__Host-` cookie, which cannot have a domain.
 const SEEDED_HOST_ONLY: &str = "Path=/; Secure; Max-Age=34560000";
 const SAPISID: [&str; 2] = ["SAPISID", "__Secure-3PAPISID"];
+/// Where a YouTube tab asks Google for fresh `__Secure-*PSIDTS` cookies. The frame that calls
+/// it lives on `accounts.youtube.com`, so the request carries that origin.
+const ROTATE_URL: &str = "https://accounts.youtube.com/RotateCookies";
+const ROTATE_ORIGIN: &str = "https://accounts.youtube.com";
+/// The fixed body the rotation frame sends.
+const ROTATE_BODY: &str = r#"[000,"-0000000000000000000"]"#;
 
 pub struct YtMusic {
     pub(crate) http: reqwest::Client,
@@ -239,6 +245,37 @@ impl YtMusic {
             bail!("{endpoint} failed with status {status}");
         }
         Ok(value)
+    }
+
+    /// Asks Google to rotate the session's timestamp cookies and saves the store. A browser tab
+    /// does this about every ten minutes, and Google stops accepting a session nobody rotates
+    /// within the hour. Fails for a guest, when Google refuses the cookies, and with a 429 when
+    /// the session rotated less than ten minutes ago.
+    pub async fn rotate_cookies(&self) -> Result<()> {
+        let authed = self
+            .authed
+            .as_ref()
+            .context("the session is not signed in")?;
+        let response = authed
+            .http
+            .post(ROTATE_URL)
+            .header("Content-Type", "application/json")
+            .header("Origin", ROTATE_ORIGIN)
+            .header("User-Agent", Client::Music.user_agent())
+            .body(ROTATE_BODY)
+            .send()
+            .await
+            .context("cannot reach the cookie rotation endpoint")?;
+        let status = response.status();
+        let rotated = response.headers().get_all(SET_COOKIE).iter().count();
+        log::debug!("ytmusic: RotateCookies: {status}, {rotated} cookies set");
+        if rotated > 0 {
+            authed.save();
+        }
+        if !status.is_success() {
+            bail!("cookie rotation failed with status {status}");
+        }
+        Ok(())
     }
 
     pub fn is_cookie_auth(&self) -> bool {
