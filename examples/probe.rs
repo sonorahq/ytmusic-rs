@@ -129,6 +129,27 @@ async fn main() -> anyhow::Result<()> {
                 mark.elapsed()
             );
         }
+        "open" => {
+            let mark = std::time::Instant::now();
+            let (format, mut stream) = api.open_audio(&argument).await?;
+            let mut got = 0usize;
+            let mut preroll = None;
+            while let Some(chunk) = stream.chunk().await? {
+                got += chunk.len();
+                if preroll.is_none() && got >= 256 * 1024 {
+                    preroll = Some(mark.elapsed());
+                }
+            }
+            println!(
+                "itag={} codec={} preroll in {:?}, {} of {:?} bytes in {:?}",
+                format.itag,
+                format.codec,
+                preroll,
+                got,
+                stream.total(),
+                mark.elapsed()
+            );
+        }
         "liked" => {
             for track in api.liked_songs().await? {
                 println!(

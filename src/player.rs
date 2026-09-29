@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use crate::client::YtMusic;
 use crate::context::{Client, random_string};
 use crate::models::AudioFormat;
+use crate::stream::AudioStream;
 
 const CHUNK: u64 = 1024 * 1024;
 const PARALLEL: usize = 4;
@@ -88,6 +89,28 @@ impl YtMusic {
         self.signed_audio(video_id)
             .await
             .with_context(|| format!("the guest stream failed too ({refused:#})"))
+    }
+
+    /// The stream to play `video_id` from, already arriving.
+    ///
+    /// The same order as [`best_audio`](Self::best_audio), guest first and signed second, but
+    /// the first range of the body is what checks the url rather than a probe of its own, so
+    /// a track that plays costs no round trip beyond the download.
+    pub async fn open_audio(&self, video_id: &str) -> Result<(AudioFormat, AudioStream)> {
+        let refused = match self.guest_audio(video_id).await {
+            Ok(format) => match AudioStream::open(self.http.clone(), &format).await {
+                Ok(stream) => return Ok((format, stream)),
+                Err(error) => error.context(format!("itag {} is not being served", format.itag)),
+            },
+            Err(error) => error,
+        };
+        log::debug!("player: the guest stream for {video_id} failed ({refused:#})");
+        let format = self
+            .signed_audio(video_id)
+            .await
+            .with_context(|| format!("the guest stream failed too ({refused:#})"))?;
+        let stream = AudioStream::open(self.http.clone(), &format).await?;
+        Ok((format, stream))
     }
 
     /// Whether the stream host will serve this url, asked with the smallest range there is.
@@ -259,23 +282,7 @@ async fn range(
     start: u64,
     end: u64,
 ) -> Result<Vec<u8>> {
-    let response = http
-        .get(url)
-        .header("Range", format!("bytes={start}-{end}"))
-        .header("User-Agent", agent)
-        .header("Accept-Encoding", "identity")
-        .header("Origin", "https://www.youtube.com")
-        .header("Referer", "https://www.youtube.com/")
-        .send()
-        .await
-        .context("cannot reach stream host")?;
-    let status = response.status();
-    if !status.is_success() {
-        bail!(
-            "stream host refused the download with status {status} \
-             (the proof-of-origin token it carried was not accepted)"
-        );
-    }
+    let response = crate::stream::request(http, url, agent, start, end).await?;
     let chunk = response.bytes().await.context("cannot read stream chunk")?;
     Ok(chunk.to_vec())
 }

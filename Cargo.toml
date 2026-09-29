@@ -12,6 +12,7 @@ bundled-sqlite = []
 anyhow = "1"
 async-trait = "0.1"
 base64 = "0.22"
+bytes = "1"
 log = "0.4"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "cookies"] }
