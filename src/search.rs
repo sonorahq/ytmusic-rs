@@ -14,11 +14,16 @@ pub const PLAYLISTS: &str = "EgWKAQIoAQ%3D%3D";
 
 impl YtMusic {
     pub async fn search_songs(&self, query: &str) -> Result<Vec<Track>> {
+        self.search_songs_with(query, true).await
+    }
+
+    pub async fn search_songs_with(&self, query: &str, use_auth: bool) -> Result<Vec<Track>> {
         let response = self
-            .execute(
+            .execute_with(
                 "search",
                 Client::Music,
                 json!({ "query": query, "params": SONGS }),
+                use_auth,
             )
             .await?;
         let mut tracks = Vec::new();
@@ -35,11 +40,16 @@ impl YtMusic {
     }
 
     pub async fn search_albums(&self, query: &str) -> Result<Vec<Album>> {
+        self.search_albums_with(query, true).await
+    }
+
+    pub async fn search_albums_with(&self, query: &str, use_auth: bool) -> Result<Vec<Album>> {
         let response = self
-            .execute(
+            .execute_with(
                 "search",
                 Client::Music,
                 json!({ "query": query, "params": ALBUMS }),
+                use_auth,
             )
             .await?;
         let mut albums = Vec::new();
@@ -54,11 +64,20 @@ impl YtMusic {
     }
 
     pub async fn search_playlists(&self, query: &str) -> Result<Vec<Playlist>> {
+        self.search_playlists_with(query, true).await
+    }
+
+    pub async fn search_playlists_with(
+        &self,
+        query: &str,
+        use_auth: bool,
+    ) -> Result<Vec<Playlist>> {
         let response = self
-            .execute(
+            .execute_with(
                 "search",
                 Client::Music,
                 json!({ "query": query, "params": PLAYLISTS }),
+                use_auth,
             )
             .await?;
         let mut playlists = Vec::new();

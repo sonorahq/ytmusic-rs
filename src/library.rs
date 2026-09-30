@@ -36,7 +36,7 @@ impl YtMusic {
             return Ok(None);
         }
         let query = dedup::search_query(track);
-        let candidates = self.search_songs(&query).await?;
+        let candidates = self.search_songs_with(&query, false).await?;
         Ok(dedup::best_song_match(track, candidates))
     }
 
