@@ -152,6 +152,12 @@ impl YtMusic {
                 }
             }
         }
+        let own = ArtistRef {
+            name: name.clone(),
+            id: Some(browse_id.to_string()),
+        };
+        credit(&mut albums, &own);
+        credit(&mut singles, &own);
         Ok(Artist {
             browse_id: browse_id.to_string(),
             name,
@@ -175,6 +181,12 @@ impl YtMusic {
                 json!({ "browseId": format!("MPAD{channel_id}") }),
             )
             .await?;
+        let own = ArtistRef {
+            name: parse::find_renderer(&response, "musicHeaderRenderer")
+                .and_then(|header| header.run_text(&["title"]))
+                .unwrap_or_default(),
+            id: Some(channel_id.to_string()),
+        };
         let mut albums = Vec::new();
         let mut pages = 0;
         loop {
@@ -198,6 +210,7 @@ impl YtMusic {
                 .execute("browse", Client::Music, json!({ "continuation": token }))
                 .await?;
         }
+        credit(&mut albums, &own);
         Ok(albums)
     }
 
@@ -351,4 +364,15 @@ fn privacy_of(response: &Value) -> Option<String> {
     found
         .into_iter()
         .find_map(|value| value.as_str().map(str::to_string))
+}
+
+/// Names `artist` on every release that lists no one. An artist's own page leaves the artist
+/// out of each release's subtitle, so without this those releases would credit nobody.
+fn credit(albums: &mut [Album], artist: &ArtistRef) {
+    if artist.name.is_empty() {
+        return;
+    }
+    for album in albums.iter_mut().filter(|album| album.artists.is_empty()) {
+        album.artists.push(artist.clone());
+    }
 }
