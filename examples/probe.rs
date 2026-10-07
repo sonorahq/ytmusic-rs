@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let command = std::env::args().nth(1).unwrap_or_default();
     let argument = std::env::args().nth(2).unwrap_or_default();
-    let api = client();
+    let api = std::sync::Arc::new(client());
     match command.as_str() {
         "search" => {
             for track in api.search_songs(&argument).await? {

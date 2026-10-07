@@ -23,6 +23,12 @@ const KEEP: Duration = Duration::from_secs(6 * 60 * 60);
 /// How long a mint may take before the request goes out without a token. Playback waits on
 /// this, so a minter that is warming up or wedged must not hold up a track.
 const PATIENCE: Duration = Duration::from_secs(5);
+/// How long a stream the host stopped serving waits for a minted token. A cold start token is
+/// refused after about a minute of audio, which the player still has buffered, so this can be
+/// long enough for a minter to open its page and attest.
+const AWAIT: Duration = Duration::from_secs(40);
+/// How often the minter is asked again while a stream waits on it.
+const POLL: Duration = Duration::from_secs(1);
 /// The first byte of a cold start token, a protobuf field tag the server expects.
 const TAG: u8 = 34;
 /// The bytes at the head of a cold start payload that double as the xor key.
@@ -73,6 +79,22 @@ impl PoTokens {
     /// start tokens, which is worth saying once in a log rather than on every track.
     pub fn has_minter(&self) -> bool {
         self.minter.is_some()
+    }
+
+    /// A minted token for `binding`, asking the minter every [`POLL`] for up to [`AWAIT`].
+    /// Never answers a cold start token, and answers `None` at once when there is no minter.
+    pub(crate) async fn await_minted(&self, binding: &str) -> Option<String> {
+        self.minter.as_ref()?;
+        let deadline = Instant::now() + AWAIT;
+        loop {
+            if let Some(token) = self.minted(binding).await {
+                return Some(token);
+            }
+            if Instant::now() + POLL > deadline {
+                return None;
+            }
+            tokio::time::sleep(POLL).await;
+        }
     }
 
     async fn minted(&self, binding: &str) -> Option<String> {

@@ -3,13 +3,17 @@
 //! The stream host serves a plain GET at a trickle and drops long connections halfway without
 //! saying so, but it answers a bounded `Range` request at full speed. So the body is asked for
 //! a mebibyte at a time, each read has a deadline, and a range that stalls or breaks is asked
-//! for again from the byte it stopped at.
+//! for again from the byte it stopped at. A url the host refuses partway through, which is what
+//! a cold start token gets after its first megabyte or so, is renewed with a minted token and
+//! read on from the same byte.
 
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use bytes::Bytes;
 
+use crate::client::YtMusic;
 use crate::models::AudioFormat;
 
 /// How much one request asks for.
@@ -32,6 +36,19 @@ pub struct AudioStream {
     response: Option<reqwest::Response>,
     /// How many attempts in a row have failed at `offset`.
     failures: u32,
+    /// How to ask for a fresh url once the host refuses this one. `None` for a stream opened
+    /// without a client, which then ends at the first refusal.
+    renewal: Option<Renewal>,
+}
+
+/// What a stream needs to ask the player for a fresh url of the same file.
+struct Renewal {
+    client: Weak<YtMusic>,
+    video_id: String,
+    itag: u32,
+    /// The byte the last renewal was made at. A renewed url refused at that same byte ends the
+    /// stream instead of renewing forever.
+    at: Option<u64>,
 }
 
 impl AudioStream {
@@ -47,9 +64,21 @@ impl AudioStream {
             end: 0,
             response: None,
             failures: 0,
+            renewal: None,
         };
         stream.request().await?;
         Ok(stream)
+    }
+
+    /// Lets the stream renew its url through `client` when the host refuses it partway through.
+    pub(crate) fn renewing(mut self, client: &Arc<YtMusic>, video_id: &str, itag: u32) -> Self {
+        self.renewal = Some(Renewal {
+            client: Arc::downgrade(client),
+            video_id: video_id.to_string(),
+            itag,
+            at: None,
+        });
+        self
     }
 
     /// The length of the body, when the player response gave one.
@@ -57,8 +86,9 @@ impl AudioStream {
         self.total
     }
 
-    /// The next part of the body, or `None` once all of it has been handed out. Fails only
-    /// when the stream host refuses a range, or the same byte has stalled `RETRIES` times.
+    /// The next part of the body, or `None` once all of it has been handed out. Fails when the
+    /// stream host refuses a range and the url cannot be renewed, or the same byte has stalled
+    /// `RETRIES` times.
     pub async fn chunk(&mut self) -> Result<Option<Bytes>> {
         loop {
             if self.total.is_some_and(|total| self.offset >= total) {
@@ -67,7 +97,10 @@ impl AudioStream {
             if self.response.is_none() {
                 match self.request().await {
                     Ok(()) => {}
-                    Err(error) if error.is::<Refused>() => return Err(error),
+                    Err(error) if error.is::<Refused>() => {
+                        self.renew(error).await?;
+                        continue;
+                    }
                     Err(error) => {
                         self.retry(error)?;
                         continue;
@@ -108,6 +141,41 @@ impl AudioStream {
             .context("the stream host did not answer")??;
         self.end = end;
         self.response = Some(response);
+        Ok(())
+    }
+
+    /// Swaps in a fresh url for the same file after the host refused this one, or hands back
+    /// `refused` when there is no way to renew or a renewed url was already refused here.
+    async fn renew(&mut self, refused: anyhow::Error) -> Result<()> {
+        let Some(renewal) = self.renewal.as_mut() else {
+            return Err(refused);
+        };
+        if renewal.at == Some(self.offset) {
+            return Err(refused);
+        }
+        let Some(client) = renewal.client.upgrade() else {
+            return Err(refused);
+        };
+        renewal.at = Some(self.offset);
+        log::debug!(
+            "player: {} was refused at byte {}, renewing the url",
+            renewal.video_id,
+            self.offset
+        );
+        let format = client
+            .renewed_audio(&renewal.video_id, renewal.itag)
+            .await
+            .map_err(|error| refused.context(format!("cannot renew the url: {error:#}")))?;
+        if format.content_length != self.total {
+            bail!(
+                "the renewed url for {} is {:?} bytes long, not {:?}",
+                renewal.video_id,
+                format.content_length,
+                self.total
+            );
+        }
+        self.url = format.url;
+        self.agent = format.user_agent;
         Ok(())
     }
 

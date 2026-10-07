@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
@@ -95,11 +96,18 @@ impl YtMusic {
     ///
     /// The same order as [`best_audio`](Self::best_audio), guest first and signed second, but
     /// the first range of the body is what checks the url rather than a probe of its own, so
-    /// a track that plays costs no round trip beyond the download.
-    pub async fn open_audio(&self, video_id: &str) -> Result<(AudioFormat, AudioStream)> {
+    /// a track that plays costs no round trip beyond the download. The stream holds the client
+    /// weakly, so a url the host stops serving partway through can be renewed.
+    pub async fn open_audio(
+        self: &Arc<Self>,
+        video_id: &str,
+    ) -> Result<(AudioFormat, AudioStream)> {
         let refused = match self.guest_audio(video_id).await {
             Ok(format) => match AudioStream::open(self.http.clone(), &format).await {
-                Ok(stream) => return Ok((format, stream)),
+                Ok(stream) => {
+                    let stream = stream.renewing(self, video_id, format.itag);
+                    return Ok((format, stream));
+                }
                 Err(error) => error.context(format!("itag {} is not being served", format.itag)),
             },
             Err(error) => error,
@@ -110,7 +118,27 @@ impl YtMusic {
             .await
             .with_context(|| format!("the guest stream failed too ({refused:#})"))?;
         let stream = AudioStream::open(self.http.clone(), &format).await?;
+        let stream = stream.renewing(self, video_id, format.itag);
         Ok((format, stream))
+    }
+
+    /// A fresh url for the `itag` stream of `video_id`, carrying a minted proof-of-origin token.
+    ///
+    /// This is for a stream the host stopped serving partway through, which is what happens to a
+    /// cold start token after its first megabyte or so. It waits for the minter instead of sending
+    /// another cold start token. It fails when no token arrives in time or the player no longer
+    /// offers that itag, since a different file cannot carry on from the same byte.
+    pub(crate) async fn renewed_audio(&self, video_id: &str, itag: u32) -> Result<AudioFormat> {
+        let binding = self
+            .session_binding()
+            .await
+            .context("no session binding to mint a token for")?;
+        let token = self
+            .po_tokens
+            .await_minted(&binding)
+            .await
+            .context("no proof-of-origin token was minted in time")?;
+        self.signed_format(video_id, &token, Some(itag)).await
     }
 
     /// Whether the stream host will serve this url, asked with the smallest range there is.
@@ -149,6 +177,18 @@ impl YtMusic {
     }
 
     async fn signed_audio(&self, video_id: &str) -> Result<AudioFormat> {
+        let token = self.po_token().await;
+        self.signed_format(video_id, &token, None).await
+    }
+
+    /// The signed-in client's stream for `video_id`, with `token` on both the player request and
+    /// the url. Takes `itag` when one is given and the best AAC stream otherwise.
+    async fn signed_format(
+        &self,
+        video_id: &str,
+        token: &str,
+        itag: Option<u32>,
+    ) -> Result<AudioFormat> {
         let solver = self.solver().await?;
         log::debug!(
             "player: asking {} for {video_id}, player {} sts {}",
@@ -156,7 +196,6 @@ impl YtMusic {
             solver.id(),
             solver.sts()
         );
-        let token = self.po_token().await;
         let payload = json!({
             "videoId": video_id,
             "contentCheckOk": true,
@@ -176,12 +215,18 @@ impl YtMusic {
             .filter_map(ciphered)
             .collect();
         audio.sort_by_key(|format| std::cmp::Reverse(format.bitrate));
-        let chosen = prefer_aac(audio)
-            .with_context(|| format!("no addressable audio stream for {video_id}"))?;
+        let chosen = match itag {
+            Some(itag) => audio
+                .into_iter()
+                .find(|format| format.itag == itag)
+                .with_context(|| format!("itag {itag} is no longer offered for {video_id}"))?,
+            None => prefer_aac(audio)
+                .with_context(|| format!("no addressable audio stream for {video_id}"))?,
+        };
         let url = decipher(&solver, &chosen).await?;
         Ok(AudioFormat {
             itag: chosen.itag,
-            url: with_pot(&url, &token),
+            url: with_pot(&url, token),
             mime: chosen.mime,
             codec: chosen.codec,
             bitrate: chosen.bitrate,
