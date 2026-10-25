@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 
+use crate::browse::MAX_PAGES;
 use crate::client::YtMusic;
 use crate::context::Client;
 use crate::dedup;
@@ -125,32 +126,46 @@ impl YtMusic {
     }
 
     pub async fn library_albums(&self) -> Result<Vec<Album>> {
-        let response = self
-            .execute(
-                "browse",
-                Client::Music,
-                json!({ "browseId": LIBRARY_ALBUMS }),
-            )
-            .await?;
-        Ok(parse::find_renderers(&response, "musicTwoRowItemRenderer")
-            .into_iter()
-            .filter_map(parse::two_row_album)
-            .collect())
+        self.library_grid(LIBRARY_ALBUMS, parse::two_row_album)
+            .await
     }
 
     pub async fn library_playlists(&self) -> Result<Vec<Playlist>> {
-        let response = self
-            .execute(
-                "browse",
-                Client::Music,
-                json!({ "browseId": LIBRARY_PLAYLISTS }),
-            )
+        let mut playlists = self
+            .library_grid(LIBRARY_PLAYLISTS, parse::two_row_playlist)
             .await?;
-        Ok(parse::find_renderers(&response, "musicTwoRowItemRenderer")
-            .into_iter()
-            .filter_map(parse::two_row_playlist)
-            .filter(|playlist| playlist.id != LIKED_SONGS)
-            .collect())
+        playlists.retain(|playlist| playlist.id != LIKED_SONGS);
+        Ok(playlists)
+    }
+
+    /// Every item `read` accepts on a library grid. The grid sends about two dozen items a page,
+    /// so later pages are fetched until it runs out or `MAX_PAGES` is reached, and a page that
+    /// fails fails the whole list.
+    async fn library_grid<T>(
+        &self,
+        browse_id: &str,
+        read: fn(&Value) -> Option<T>,
+    ) -> Result<Vec<T>> {
+        let mut response = self
+            .execute("browse", Client::Music, json!({ "browseId": browse_id }))
+            .await?;
+        let mut items = Vec::new();
+        let mut pages = 0;
+        loop {
+            items.extend(
+                parse::find_renderers(&response, "musicTwoRowItemRenderer")
+                    .into_iter()
+                    .filter_map(read),
+            );
+            pages += 1;
+            let Some(token) = grid_continuation(&response).filter(|_| pages < MAX_PAGES) else {
+                break;
+            };
+            response = self
+                .execute("browse", Client::Music, json!({ "continuation": token }))
+                .await?;
+        }
+        Ok(items)
     }
 
     pub async fn profile(&self) -> Result<Profile> {
@@ -264,4 +279,13 @@ fn snippet(value: &serde_json::Value) -> String {
     let mut text = value.to_string();
     text.truncate(4000);
     text
+}
+
+/// The token for a library grid's next page. Only the grid's own continuation counts, since the
+/// sort chips on the same page carry reload tokens that would start the grid over.
+fn grid_continuation(response: &Value) -> Option<String> {
+    parse::find_renderers(response, "gridRenderer")
+        .into_iter()
+        .chain(parse::find_renderers(response, "gridContinuation"))
+        .find_map(parse::shelf_continuation)
 }

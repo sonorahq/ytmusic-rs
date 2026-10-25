@@ -11,7 +11,7 @@ use crate::nav::Nav as _;
 use crate::parse;
 use crate::util::parse_year;
 
-const MAX_PAGES: usize = 50;
+pub(crate) const MAX_PAGES: usize = 50;
 
 impl YtMusic {
     pub async fn album(&self, browse_id: &str) -> Result<AlbumDetail> {
