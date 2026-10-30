@@ -78,6 +78,49 @@ impl YtMusic {
         .await
     }
 
+    /// Uploads `image` and makes it the playlist's thumbnail. YouTube crops it to a square, so
+    /// a square picture shows as it is. An account that has not verified a phone number gets
+    /// the upload through and the attach refused.
+    pub async fn set_playlist_thumbnail(&self, playlist_id: &str, image: Vec<u8>) -> Result<()> {
+        let blob = self.upload_playlist_image(image).await?;
+        let reply = self
+            .execute(
+                "browse/edit_playlist",
+                Client::Music,
+                json!({
+                    "playlistId": strip_vl(playlist_id),
+                    "actions": [{
+                        "action": "ACTION_SET_CUSTOM_THUMBNAIL",
+                        "addedCustomThumbnail": {
+                            "imageKey": thumbnail_key(),
+                            "playlistScottyEncryptedBlobId": blob,
+                        },
+                    }],
+                }),
+            )
+            .await
+            .context("cannot attach the thumbnail")?;
+        succeeded(&reply)
+    }
+
+    /// Takes the playlist's own thumbnail off, so YouTube shows its collage again.
+    pub async fn remove_playlist_thumbnail(&self, playlist_id: &str) -> Result<()> {
+        let reply = self
+            .execute(
+                "browse/edit_playlist",
+                Client::Music,
+                json!({
+                    "playlistId": strip_vl(playlist_id),
+                    "actions": [{
+                        "action": "ACTION_REMOVE_CUSTOM_THUMBNAIL",
+                        "deletedCustomThumbnail": thumbnail_key(),
+                    }],
+                }),
+            )
+            .await?;
+        succeeded(&reply)
+    }
+
     pub async fn add_playlist_track(&self, playlist_id: &str, video_id: &str) -> Result<()> {
         self.edit_playlist(
             playlist_id,
@@ -115,6 +158,23 @@ impl YtMusic {
         )
         .await?;
         Ok(())
+    }
+}
+
+/// Which picture slot of a playlist the custom thumbnail goes in.
+fn thumbnail_key() -> Value {
+    json!({ "name": "studio_square_thumbnail", "type": "PLAYLIST_IMAGE_TYPE_CUSTOM_THUMBNAIL" })
+}
+
+/// Fails unless an `edit_playlist` reply reports success. YouTube answers 200 with a failed
+/// status for an edit it turned down.
+fn succeeded(reply: &Value) -> Result<()> {
+    match reply["status"].as_str() {
+        Some("STATUS_SUCCEEDED") => Ok(()),
+        status => anyhow::bail!(
+            "YouTube refused the edit: {}",
+            status.unwrap_or("no status")
+        ),
     }
 }
 
