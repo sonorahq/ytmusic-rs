@@ -14,6 +14,9 @@ use crate::context::Client;
 
 const API_BASE: &str = "https://www.youtube.com/youtubei/v1/";
 const MUSIC_API_BASE: &str = "https://music.youtube.com/youtubei/v1/";
+/// Where YouTube Music uploads a playlist's own picture before `edit_playlist` attaches it.
+const THUMBNAIL_UPLOAD: &str =
+    "https://music.youtube.com/playlist_image_upload/playlist_custom_thumbnail";
 const VISITOR_URL: &str = "https://www.youtube.com/sw.js_data";
 /// Where the signed-in account's data sync id is published.
 const HOME_URL: &str = "https://www.youtube.com/";
@@ -267,6 +270,94 @@ impl YtMusic {
             bail!("{endpoint} failed with status {status}");
         }
         Ok(value)
+    }
+
+    /// Uploads `image` as a playlist thumbnail through Google's resumable upload protocol and
+    /// answers the encrypted blob id `edit_playlist` attaches. Only a signed-in client can.
+    pub(crate) async fn upload_playlist_image(&self, image: Vec<u8>) -> Result<String> {
+        let authed = self
+            .authed
+            .as_ref()
+            .context("uploading a thumbnail needs a signed-in account")?;
+        let origin = "https://music.youtube.com";
+        let signed = |request: reqwest::RequestBuilder| -> Result<reqwest::RequestBuilder> {
+            let authorization = authed
+                .authorization(origin)
+                .context("cookies have no SAPISID")?;
+            let mut request = request
+                .header("Origin", origin)
+                .header("X-Origin", origin)
+                .header("Referer", MUSIC_URL)
+                .header("User-Agent", Client::Music.user_agent())
+                .header("X-Youtube-Client-Name", Client::Music.id().to_string())
+                .header("X-Youtube-Client-Version", Client::Music.version())
+                .header("Authorization", authorization)
+                .header("X-Goog-AuthUser", self.authuser.to_string());
+            if let Some(page) = &self.page_id {
+                request = request.header("X-Goog-PageId", page);
+            }
+            Ok(request)
+        };
+
+        let started = signed(authed.http.post(THUMBNAIL_UPLOAD))?
+            .header(
+                "Content-Type",
+                "application/x-www-form-urlencoded;charset=utf-8",
+            )
+            .header("Content-Length", "0")
+            .header("X-Goog-Upload-Command", "start")
+            .header("X-Goog-Upload-Protocol", "resumable")
+            .header(
+                "X-Goog-Upload-Header-Content-Length",
+                image.len().to_string(),
+            )
+            .send()
+            .await
+            .context("cannot start the thumbnail upload")?;
+        let status = started.status();
+        if !status.is_success() {
+            bail!("starting the thumbnail upload failed with status {status}");
+        }
+        let target = match started.headers().get("X-Goog-Upload-URL") {
+            Some(url) => url
+                .to_str()
+                .context("the upload url is not text")?
+                .to_owned(),
+            None => {
+                let id = started
+                    .headers()
+                    .get("X-GUploader-UploadID")
+                    .context("the upload names no target")?
+                    .to_str()
+                    .context("the upload id is not text")?;
+                format!("{THUMBNAIL_UPLOAD}?upload_id={id}&upload_protocol=resumable")
+            }
+        };
+
+        let sent = signed(authed.http.post(&target))?
+            .header("X-Goog-Upload-Command", "upload, finalize")
+            .header("X-Goog-Upload-Offset", "0")
+            .body(image)
+            .send()
+            .await
+            .context("cannot send the thumbnail")?;
+        let status = sent.status();
+        if sent.headers().contains_key(SET_COOKIE) {
+            authed.save();
+        }
+        let body = sent
+            .bytes()
+            .await
+            .context("cannot read the thumbnail upload response")?;
+        if !status.is_success() {
+            bail!("the thumbnail upload failed with status {status}");
+        }
+        let reply: Value =
+            serde_json::from_slice(&body).context("the thumbnail upload answered no json")?;
+        reply["encryptedBlobId"]
+            .as_str()
+            .map(str::to_owned)
+            .context("the thumbnail upload answered no blob id")
     }
 
     /// Asks Google to rotate the session's timestamp cookies and saves the store. A browser tab
