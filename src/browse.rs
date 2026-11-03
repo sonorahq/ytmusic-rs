@@ -128,7 +128,9 @@ impl YtMusic {
                     .and_then(|button| button.run_text(&["subscriberCountText"]))
             });
         let mut top_tracks = Vec::new();
+        let mut songs = None;
         if let Some(shelf) = parse::find_renderer(&response, "musicShelfRenderer") {
+            songs = songs_playlist(shelf);
             for item in shelf.items(&["contents"]) {
                 if let Some(track) = parse::list_item_track(item) {
                     top_tracks.push(track);
@@ -165,6 +167,7 @@ impl YtMusic {
             subscribers,
             thumbnails: parse::thumbnails(header),
             top_tracks,
+            songs,
             albums,
             singles,
         })
@@ -375,4 +378,21 @@ fn credit(albums: &mut [Album], artist: &ArtistRef) {
     for album in albums.iter_mut().filter(|album| album.artists.is_empty()) {
         album.artists.push(artist.clone());
     }
+}
+
+/// The playlist id the top songs shelf links to, from its title or its show-all button, with
+/// the `VL` that marks a browse id dropped so it reads as a playlist id.
+fn songs_playlist(shelf: &Value) -> Option<String> {
+    let endpoint = shelf
+        .runs(&["title"])
+        .iter()
+        .find_map(|run| run.at(&["navigationEndpoint", "browseEndpoint"]))
+        .or_else(|| shelf.at(&["bottomEndpoint", "browseEndpoint"]))?;
+    let browse_id = endpoint.str_at(&["browseId"])?;
+    Some(
+        browse_id
+            .strip_prefix("VL")
+            .unwrap_or(browse_id)
+            .to_string(),
+    )
 }
