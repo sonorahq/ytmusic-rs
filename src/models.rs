@@ -109,8 +109,8 @@ pub struct Artist {
     pub subscribers: Option<String>,
     pub thumbnails: Vec<Thumbnail>,
     pub top_tracks: Vec<Track>,
-    /// The playlist behind the top songs shelf, which lists every song of the artist in
-    /// YouTube Music's own order of popularity. `None` when the page has no such shelf.
+    /// The ranked playlist linked by the top songs shelf. YouTube limits its length, and
+    /// pages without a linked playlist leave this absent.
     #[serde(default)]
     pub songs: Option<String>,
     pub albums: Vec<Album>,

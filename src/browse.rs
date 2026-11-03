@@ -380,8 +380,8 @@ fn credit(albums: &mut [Album], artist: &ArtistRef) {
     }
 }
 
-/// The playlist id the top songs shelf links to, from its title or its show-all button, with
-/// the `VL` that marks a browse id dropped so it reads as a playlist id.
+/// Reads the top songs playlist from the shelf title or show-all button.
+/// Browse destinations without the playlist prefix are ignored.
 fn songs_playlist(shelf: &Value) -> Option<String> {
     let endpoint = shelf
         .runs(&["title"])
@@ -389,10 +389,5 @@ fn songs_playlist(shelf: &Value) -> Option<String> {
         .find_map(|run| run.at(&["navigationEndpoint", "browseEndpoint"]))
         .or_else(|| shelf.at(&["bottomEndpoint", "browseEndpoint"]))?;
     let browse_id = endpoint.str_at(&["browseId"])?;
-    Some(
-        browse_id
-            .strip_prefix("VL")
-            .unwrap_or(browse_id)
-            .to_string(),
-    )
+    Some(browse_id.strip_prefix("VL")?.to_string())
 }
