@@ -656,14 +656,15 @@ impl Authed {
         ))
     }
 
-    /// Writes the store to its file, if one is set. On failure the error is logged and the
-    /// cookies stay in memory.
+    /// Serializes and replaces the cookie file under one lock so older snapshots cannot finish last.
+    /// Failures are logged and leave the cookies in memory.
     fn save(&self) {
         let Some(path) = &self.file else {
             return;
         };
+        let store = self.store();
         let mut body = Vec::new();
-        if let Err(error) = cookie_store::serde::json::save(&self.store(), &mut body) {
+        if let Err(error) = cookie_store::serde::json::save(&store, &mut body) {
             log::warn!("ytmusic: cannot encode the cookies: {error}");
             return;
         }
@@ -725,24 +726,30 @@ fn load(path: &Path) -> Option<CookieStore> {
     }
 }
 
-/// Replaces `path` with a file readable by its owner only, through a temp file and a
-/// rename.
+/// Replaces `path` through a unique temporary file that is synced before the rename.
+/// Temporary files are readable only by their owner on Unix and are removed on failure.
 fn write_private(path: &Path, body: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("cannot create the cookie dir")?;
-    }
-    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&temp, body).with_context(|| format!("cannot write {}", temp.display()))?;
+    use std::io::Write as _;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).context("cannot create the cookie dir")?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(".cookies-")
+        .tempfile_in(parent)
+        .context("cannot create a temporary cookie file")?;
+    temp.write_all(body).context("cannot write the cookies")?;
+    temp.as_file()
+        .sync_all()
+        .context("cannot sync the cookies")?;
+    temp.persist(path)
+        .with_context(|| format!("cannot replace {}", path.display()))?;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("cannot restrict {}", temp.display()))?;
-    }
-    if let Err(error) = std::fs::rename(&temp, path) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(error).with_context(|| format!("cannot replace {}", path.display()));
-    }
+    std::fs::File::open(parent)
+        .and_then(|folder| folder.sync_all())
+        .context("cannot sync the cookie dir")?;
     Ok(())
 }
 
