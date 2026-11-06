@@ -181,12 +181,15 @@ impl YtMusic {
             .await?;
         let Some(account) = parse::find_renderer(&response, "activeAccountHeaderRenderer") else {
             log::debug!(
-                "profile: account_menu has no active account, response: {}",
-                snippet(&response)
+                "profile: account_menu has no active account, response holds {}",
+                fields(&response)
             );
             anyhow::bail!("account menu has no active account");
         };
-        log::debug!("profile: activeAccountHeaderRenderer: {account}");
+        log::debug!(
+            "profile: activeAccountHeaderRenderer holds {}",
+            fields(account)
+        );
         Ok(profile(account))
     }
     pub async fn identities(&self) -> Result<Vec<Identity>> {
@@ -218,8 +221,8 @@ impl YtMusic {
         }
         if let Ok(response) = &response {
             log::debug!(
-                "identities: the switcher named no account, response: {}",
-                snippet(response)
+                "identities: the switcher named no account, response holds {}",
+                fields(response)
             );
         }
         Ok(vec![Identity {
@@ -234,12 +237,12 @@ impl YtMusic {
             .await?;
         let Some(account) = parse::find_renderer(&response, "accountItem") else {
             log::debug!(
-                "profile: accounts_list has no accountItem, response: {}",
-                snippet(&response)
+                "profile: accounts_list has no accountItem, response holds {}",
+                fields(&response)
             );
             anyhow::bail!("accounts list has no account");
         };
-        log::debug!("profile: accountItem: {account}");
+        log::debug!("profile: accountItem holds {}", fields(account));
         Ok(profile(account))
     }
 }
@@ -275,10 +278,17 @@ fn page_id(item: &Value) -> Option<String> {
         .find_map(|token| token.str_at(&["pageId"]).map(str::to_string))
 }
 
-fn snippet(value: &serde_json::Value) -> String {
-    let mut text = value.to_string();
-    text.truncate(4000);
-    text
+/// The names of the top-level fields of `value`, for a log line. Account responses carry the
+/// user's name, handle and email, so a log lists the fields it found and never their contents.
+fn fields(value: &Value) -> String {
+    match value.as_object() {
+        Some(object) => object
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+        None => "no object".to_string(),
+    }
 }
 
 /// The token for a library grid's next page. Only the grid's own continuation counts, since the
