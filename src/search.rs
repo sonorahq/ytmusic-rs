@@ -8,6 +8,7 @@ use crate::nav::Nav as _;
 use crate::parse;
 
 pub const SONGS: &str = "EgWKAQIIAQ%3D%3D";
+pub const VIDEOS: &str = "EgWKAQIQAQ%3D%3D";
 pub const ALBUMS: &str = "EgWKAQIYAQ%3D%3D";
 pub const ARTISTS: &str = "EgWKAQIgAQ%3D%3D";
 pub const PLAYLISTS: &str = "EgWKAQIoAQ%3D%3D";
@@ -17,12 +18,28 @@ impl YtMusic {
         self.search_songs_with(query, true).await
     }
 
+    /// Songs first, then music videos, since YouTube Music indexes both and a video may be the
+    /// only upload of a track. A failed video search leaves the songs standing.
     pub async fn search_songs_with(&self, query: &str, use_auth: bool) -> Result<Vec<Track>> {
+        let (songs, videos) = tokio::join!(
+            self.search_tracks(query, SONGS, use_auth),
+            self.search_tracks(query, VIDEOS, use_auth),
+        );
+        let mut tracks = songs?;
+        for video in videos.unwrap_or_default() {
+            if !tracks.iter().any(|track| track.video_id == video.video_id) {
+                tracks.push(video);
+            }
+        }
+        Ok(tracks)
+    }
+
+    async fn search_tracks(&self, query: &str, params: &str, use_auth: bool) -> Result<Vec<Track>> {
         let response = self
             .execute_with(
                 "search",
                 Client::Music,
-                json!({ "query": query, "params": SONGS }),
+                json!({ "query": query, "params": params }),
                 use_auth,
             )
             .await?;

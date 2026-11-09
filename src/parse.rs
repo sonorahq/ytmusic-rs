@@ -245,6 +245,41 @@ fn panel_kind(renderer: &Value) -> TrackKind {
     }
 }
 
+/// A video card from the artist page "Videos" carousel. Cards without a watch endpoint are
+/// skipped, and the view count rides along in the subtitle after the credited artists.
+pub fn two_row_video(item: &Value) -> Option<Track> {
+    let renderer = item.at(&["musicTwoRowItemRenderer"]).unwrap_or(item);
+    let video_id = renderer
+        .str_at(&["navigationEndpoint", "watchEndpoint", "videoId"])?
+        .to_string();
+    let title = renderer.run_text(&["title"])?;
+    let runs = renderer.runs(&["subtitle"]);
+    let views = runs
+        .iter()
+        .filter_map(|run| run.str_at(&["text"]))
+        .find(|text| text.contains("view"))
+        .map(str::to_string);
+    let credited: Vec<Value> = runs
+        .iter()
+        .filter(|run| run.str_at(&["text"]) != views.as_deref())
+        .cloned()
+        .collect();
+    Some(Track {
+        video_id: Some(video_id),
+        title,
+        artists: subtitle_artists(&credited),
+        album: None,
+        duration: None,
+        thumbnails: thumbnails(renderer),
+        explicit: explicit(renderer),
+        available: true,
+        kind: TrackKind::Video,
+        set_video_id: None,
+        liked: None,
+        views,
+    })
+}
+
 pub fn two_row_album(item: &Value) -> Option<Album> {
     let renderer = item.at(&["musicTwoRowItemRenderer"]).unwrap_or(item);
     let browse_id = renderer
