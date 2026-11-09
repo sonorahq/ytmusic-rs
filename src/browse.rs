@@ -149,7 +149,7 @@ impl YtMusic {
                     carousel
                         .items(&["contents"])
                         .iter()
-                        .filter_map(|item| parse::two_row_video(item)),
+                        .filter_map(parse::two_row_video),
                 );
                 continue;
             }

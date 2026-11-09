@@ -254,14 +254,15 @@ pub fn two_row_video(item: &Value) -> Option<Track> {
         .to_string();
     let title = renderer.run_text(&["title"])?;
     let runs = renderer.runs(&["subtitle"]);
+    let is_views = |text: &str| text.ends_with(" views") || text.ends_with(" view");
     let views = runs
         .iter()
         .filter_map(|run| run.str_at(&["text"]))
-        .find(|text| text.contains("view"))
+        .find(|text| is_views(text))
         .map(str::to_string);
     let credited: Vec<Value> = runs
         .iter()
-        .filter(|run| run.str_at(&["text"]) != views.as_deref())
+        .filter(|run| !run.str_at(&["text"]).is_some_and(is_views))
         .cloned()
         .collect();
     Some(Track {
