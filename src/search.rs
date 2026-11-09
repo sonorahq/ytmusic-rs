@@ -13,20 +13,23 @@ pub const ALBUMS: &str = "EgWKAQIYAQ%3D%3D";
 pub const ARTISTS: &str = "EgWKAQIgAQ%3D%3D";
 pub const PLAYLISTS: &str = "EgWKAQIoAQ%3D%3D";
 
+/// How long song results wait on the optional video search before going out without it.
+const VIDEO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl YtMusic {
     pub async fn search_songs(&self, query: &str) -> Result<Vec<Track>> {
         self.search_songs_with(query, true).await
     }
 
     /// Songs first, then music videos, since YouTube Music indexes both and a video may be the
-    /// only upload of a track. A failed video search leaves the songs standing.
+    /// only upload of a track. A failed or slow video search leaves the songs standing.
     pub async fn search_songs_with(&self, query: &str, use_auth: bool) -> Result<Vec<Track>> {
         let (songs, videos) = tokio::join!(
             self.search_tracks(query, SONGS, use_auth),
-            self.search_tracks(query, VIDEOS, use_auth),
+            tokio::time::timeout(VIDEO_TIMEOUT, self.search_tracks(query, VIDEOS, use_auth)),
         );
         let mut tracks = songs?;
-        for video in videos.unwrap_or_default() {
+        for video in videos.ok().and_then(Result::ok).unwrap_or_default() {
             if !tracks.iter().any(|track| track.video_id == video.video_id) {
                 tracks.push(video);
             }

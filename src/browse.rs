@@ -145,12 +145,18 @@ impl YtMusic {
                 .unwrap_or_default();
             if label == "Videos" {
                 // Music videos play like songs here, so they follow the ranked songs.
-                top_tracks.extend(
-                    carousel
-                        .items(&["contents"])
+                for video in carousel
+                    .items(&["contents"])
+                    .iter()
+                    .filter_map(parse::two_row_video)
+                {
+                    if !top_tracks
                         .iter()
-                        .filter_map(parse::two_row_video),
-                );
+                        .any(|track| track.video_id == video.video_id)
+                    {
+                        top_tracks.push(video);
+                    }
+                }
                 continue;
             }
             let bucket = match label.as_str() {

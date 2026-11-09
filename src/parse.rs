@@ -253,6 +253,7 @@ pub fn two_row_video(item: &Value) -> Option<Track> {
         .str_at(&["navigationEndpoint", "watchEndpoint", "videoId"])?
         .to_string();
     let title = renderer.run_text(&["title"])?;
+    let unavailable = renderer.str_at(&["musicItemRendererDisplayPolicy"]) == Some(GREY_OUT);
     let runs = renderer.runs(&["subtitle"]);
     let is_views = |text: &str| text.ends_with(" views") || text.ends_with(" view");
     let views = runs
@@ -273,7 +274,7 @@ pub fn two_row_video(item: &Value) -> Option<Track> {
         duration: None,
         thumbnails: thumbnails(renderer),
         explicit: explicit(renderer),
-        available: true,
+        available: !unavailable,
         kind: TrackKind::Video,
         set_video_id: None,
         liked: None,
