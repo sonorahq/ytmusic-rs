@@ -41,6 +41,7 @@ impl YtMusic {
             artists.push(ArtistRef {
                 name: text,
                 id: None,
+                channel: false,
             });
         }
         let track_count = header
@@ -173,6 +174,7 @@ impl YtMusic {
         let own = ArtistRef {
             name: name.clone(),
             id: Some(browse_id.to_string()),
+            channel: false,
         };
         credit(&mut albums, &own);
         credit(&mut singles, &own);
@@ -205,6 +207,7 @@ impl YtMusic {
                 .and_then(|header| header.run_text(&["title"]))
                 .unwrap_or_default(),
             id: Some(channel_id.to_string()),
+            channel: false,
         };
         let mut albums = Vec::new();
         let mut pages = 0;

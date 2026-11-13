@@ -8,6 +8,7 @@ pub const EXPLICIT_BADGE: &str = "MUSIC_EXPLICIT_BADGE";
 const GREY_OUT: &str = "MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT";
 const ALBUM_PAGE: &str = "MUSIC_PAGE_TYPE_ALBUM";
 const PLAYLIST_PAGE: &str = "MUSIC_PAGE_TYPE_PLAYLIST";
+const CHANNEL_PAGE: &str = "MUSIC_PAGE_TYPE_USER_CHANNEL";
 
 pub fn thumbnails(node: &Value) -> Vec<Thumbnail> {
     let mut found = Vec::new();
@@ -45,6 +46,7 @@ pub fn artist_runs(runs: &[Value]) -> Vec<ArtistRef> {
                 Some(id) if id.starts_with("UC") => Some(ArtistRef {
                     name,
                     id: Some(id.to_string()),
+                    channel: page_type(run) == Some(CHANNEL_PAGE),
                 }),
                 _ => None,
             }
@@ -75,6 +77,7 @@ fn plain_artist_runs(runs: &[Value]) -> Vec<ArtistRef> {
         artists.push(ArtistRef {
             name: text.to_string(),
             id: run_browse_id(run).map(str::to_string),
+            channel: page_type(run) == Some(CHANNEL_PAGE),
         });
     }
     artists
@@ -517,6 +520,7 @@ fn subtitle_artists(runs: &[Value]) -> Vec<ArtistRef> {
         .map(|text| ArtistRef {
             name: text.to_string(),
             id: None,
+            channel: false,
         })
         .collect()
 }
