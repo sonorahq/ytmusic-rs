@@ -192,6 +192,7 @@ mod tests {
             artists: vec![ArtistRef {
                 name: artist.to_string(),
                 id: None,
+                channel: false,
             }],
             album: album.then(|| AlbumRef {
                 name: "Album".to_string(),

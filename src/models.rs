@@ -11,6 +11,10 @@ pub struct Thumbnail {
 pub struct ArtistRef {
     pub name: String,
     pub id: Option<String>,
+    /// True when the credit links to a plain YouTube channel and not an artist page, as on covers,
+    /// edits and reactions anyone can upload.
+    #[serde(default)]
+    pub channel: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
