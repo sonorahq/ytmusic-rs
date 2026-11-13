@@ -143,6 +143,22 @@ impl YtMusic {
             let label = carousel
                 .run_text(&["header", "musicCarouselShelfBasicHeaderRenderer", "title"])
                 .unwrap_or_default();
+            if label == "Videos" {
+                // Music videos play like songs here, so they follow the ranked songs.
+                for video in carousel
+                    .items(&["contents"])
+                    .iter()
+                    .filter_map(parse::two_row_video)
+                {
+                    if !top_tracks
+                        .iter()
+                        .any(|track| track.video_id == video.video_id)
+                    {
+                        top_tracks.push(video);
+                    }
+                }
+                continue;
+            }
             let bucket = match label.as_str() {
                 "Albums" => &mut albums,
                 "Singles" | "Singles & EPs" | "Singles and EPs" => &mut singles,

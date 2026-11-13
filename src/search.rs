@@ -8,21 +8,42 @@ use crate::nav::Nav as _;
 use crate::parse;
 
 pub const SONGS: &str = "EgWKAQIIAQ%3D%3D";
+pub const VIDEOS: &str = "EgWKAQIQAQ%3D%3D";
 pub const ALBUMS: &str = "EgWKAQIYAQ%3D%3D";
 pub const ARTISTS: &str = "EgWKAQIgAQ%3D%3D";
 pub const PLAYLISTS: &str = "EgWKAQIoAQ%3D%3D";
 
+/// How long song results wait on the optional video search before going out without it.
+const VIDEO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl YtMusic {
+    /// Songs first, then music videos, since YouTube Music indexes both and a video may be the
+    /// only upload of a track. A failed or slow video search leaves the songs standing.
     pub async fn search_songs(&self, query: &str) -> Result<Vec<Track>> {
-        self.search_songs_with(query, true).await
+        let (songs, videos) = tokio::join!(
+            self.search_songs_with(query, true),
+            tokio::time::timeout(VIDEO_TIMEOUT, self.search_tracks(query, VIDEOS, true)),
+        );
+        let mut tracks = songs?;
+        for video in videos.ok().and_then(Result::ok).unwrap_or_default() {
+            if !tracks.iter().any(|track| track.video_id == video.video_id) {
+                tracks.push(video);
+            }
+        }
+        Ok(tracks)
     }
 
+    /// Songs only, for callers that resolve a track to its song and have no use for videos.
     pub async fn search_songs_with(&self, query: &str, use_auth: bool) -> Result<Vec<Track>> {
+        self.search_tracks(query, SONGS, use_auth).await
+    }
+
+    async fn search_tracks(&self, query: &str, params: &str, use_auth: bool) -> Result<Vec<Track>> {
         let response = self
             .execute_with(
                 "search",
                 Client::Music,
-                json!({ "query": query, "params": SONGS }),
+                json!({ "query": query, "params": params }),
                 use_auth,
             )
             .await?;
