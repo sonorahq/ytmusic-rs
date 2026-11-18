@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 
-use crate::client::YtMusic;
+use crate::client::{NetworkBlocked, YtMusic};
 use crate::context::{Client, random_string};
 use crate::models::AudioFormat;
 use crate::stream::AudioStream;
@@ -99,6 +99,7 @@ impl YtMusic {
     /// url needs a minted token and minting opens a browser page.
     pub async fn best_audio(&self, video_id: &str) -> Result<AudioFormat> {
         let mut refusals = Vec::new();
+        let mut blocked = false;
         for client in [Client::VisionOs, Client::Embedded] {
             let found = match client {
                 Client::VisionOs => self.guest_audio(video_id, None).await,
@@ -111,14 +112,17 @@ impl YtMusic {
                         refusals.push(format!("the stream host refused the {} url", client.name()))
                     }
                 },
-                Err(error) => refusals.push(format!("{error:#}")),
+                Err(error) => {
+                    blocked |= error.is::<NetworkBlocked>();
+                    refusals.push(format!("{error:#}"));
+                }
             }
         }
         let refused = refusals.join(", ");
         log::debug!("player: the tokenless streams for {video_id} failed ({refused})");
         self.signed_audio(video_id, Choice::Within(None))
             .await
-            .with_context(|| format!("the tokenless streams failed too ({refused})"))
+            .map_err(|error| exhausted(error, blocked, &refused))
     }
 
     /// The best stream to play `video_id` from, already arriving, chosen as
@@ -156,6 +160,7 @@ impl YtMusic {
             }
         }
         let mut refusals = Vec::new();
+        let mut blocked = false;
         for client in [Client::VisionOs, Client::Embedded] {
             let found = match client {
                 Client::VisionOs => self.guest_audio(video_id, ceiling).await,
@@ -172,6 +177,7 @@ impl YtMusic {
                         "player: the {} stream for {video_id} failed ({error:#})",
                         client.name()
                     );
+                    blocked |= error.is::<NetworkBlocked>();
                     refusals.push(format!("{error:#}"));
                 }
             }
@@ -179,7 +185,7 @@ impl YtMusic {
         let refused = refusals.join(", ");
         self.open_signed(video_id, Choice::Within(ceiling))
             .await
-            .with_context(|| format!("the tokenless streams failed too ({refused})"))
+            .map_err(|error| exhausted(error, blocked, &refused))
     }
 
     /// The signed-in client's stream for `video_id` as `choice` picks it, already arriving.
@@ -666,6 +672,17 @@ fn set_params(url: &mut reqwest::Url, changes: &[(&str, &str)]) {
         }
     }
     query.finish();
+}
+
+/// The error to report once the signed-in client failed `last` after the tokenless ones were
+/// `refused`. When Google refused the network for any of them, the result is a
+/// [`NetworkBlocked`], since that is the one cause the listener can act on.
+fn exhausted(last: anyhow::Error, blocked: bool, refused: &str) -> anyhow::Error {
+    let failed = format!("the tokenless streams failed too ({refused})");
+    match blocked && !last.is::<NetworkBlocked>() {
+        true => anyhow::Error::new(NetworkBlocked).context(format!("{last:#}, and {failed}")),
+        false => last.context(failed),
+    }
 }
 
 fn playable<'a>(response: &'a Value, video_id: &str) -> Result<&'a Vec<Value>> {

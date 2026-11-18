@@ -43,6 +43,23 @@ const ROTATE_URL: &str = "https://accounts.youtube.com/RotateCookies";
 const ROTATE_ORIGIN: &str = "https://accounts.youtube.com";
 /// The fixed body the rotation frame sends.
 const ROTATE_BODY: &str = r#"[000,"-0000000000000000000"]"#;
+/// What Google's "Sorry..." page carries in place of an API answer. It is the 403 that refuses
+/// a network sending automated queries, or the captcha under `/sorry/` that limits one.
+const SORRY: [&str; 2] = ["<title>Sorry...</title>", "/sorry/"];
+
+/// The error a request fails with when Google answers with its "Sorry..." page instead of the
+/// API. Google refuses the network the request came from, often a VPN server, so every request
+/// from it fails the same way until the network changes.
+#[derive(Clone, Copy, Debug)]
+pub struct NetworkBlocked;
+
+impl std::fmt::Display for NetworkBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("youtube refuses requests from this network")
+    }
+}
+
+impl std::error::Error for NetworkBlocked {}
 
 pub struct YtMusic {
     pub(crate) http: reqwest::Client,
@@ -252,6 +269,12 @@ impl YtMusic {
             body.len()
         );
         let Ok(value) = serde_json::from_slice::<Value>(&body) else {
+            let text = String::from_utf8_lossy(&body);
+            if SORRY.iter().any(|mark| text.contains(mark)) {
+                let refused = format!("{endpoint} answered {status} with google's sorry page");
+                log::warn!("{refused}");
+                return Err(anyhow::Error::new(NetworkBlocked).context(refused));
+            }
             log::warn!(
                 "{endpoint} non-json body: {}",
                 String::from_utf8_lossy(&body[..body.len().min(600)])
