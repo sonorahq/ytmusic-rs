@@ -15,7 +15,7 @@ pub mod search;
 pub mod stream;
 pub mod util;
 
-pub use client::YtMusic;
+pub use client::{NetworkBlocked, YtMusic};
 pub use context::Client;
 pub use models::*;
 pub use player::SignInRequired;
