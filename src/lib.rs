@@ -20,4 +20,4 @@ pub use context::Client;
 pub use models::*;
 pub use player::SignInRequired;
 pub use potoken::Minter;
-pub use stream::AudioStream;
+pub use stream::{AudioStream, Locator};
