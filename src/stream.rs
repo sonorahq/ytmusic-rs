@@ -228,18 +228,15 @@ impl AudioStream {
 }
 
 impl Locator {
-    /// The url to ask for the file at now.
-    pub fn url(&self) -> String {
-        self.link().0
-    }
-
-    /// The headers every request for the file has to carry, the client's `User-Agent` among
-    /// them. They can change when the url is renewed, so ask again after [`renew`](Self::renew).
-    pub fn headers(&self) -> Vec<(&'static str, &'static str)> {
-        let agent = self.link().1;
-        std::iter::once(("User-Agent", agent))
+    /// The url to ask for the file at now and the headers every request for it has to carry,
+    /// the client's `User-Agent` among them. Both are read at once, so a renewal never pairs
+    /// one client's url with another client's headers.
+    pub fn request(&self) -> (String, Vec<(&'static str, &'static str)>) {
+        let (url, agent) = self.link();
+        let headers = std::iter::once(("User-Agent", agent))
             .chain(HEADERS)
-            .collect()
+            .collect();
+        (url, headers)
     }
 
     /// The length of the file, when the player response gave one.
