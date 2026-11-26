@@ -15,7 +15,7 @@ base64 = "0.22"
 bytes = "1"
 log = "0.4"
 rand = "0.9"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "cookies"] }
+reqwest = { version = "0.12.8", default-features = false, features = ["rustls-tls", "json", "gzip", "cookies", "socks"] }
 reqwest_cookie_store = "0.9"
 cookie_store = "0.22"
 serde = { version = "1", features = ["derive"] }
