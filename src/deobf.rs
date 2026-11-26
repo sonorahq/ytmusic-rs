@@ -251,7 +251,7 @@ unsafe extern "C" {
 }
 
 const PREPROCESS: &str = r#"
-var __prepared = jsc({
+var __prepared = jsc.default({
   type: "player",
   player: __player,
   requests: [],
@@ -332,6 +332,11 @@ pub async fn fetch(http: &reqwest::Client, cache: Option<&Path>) -> Result<Scrip
             prepared: true,
         });
     }
+    download(http, id).await
+}
+
+/// Downloads the script of the player named `id` and reads its signature timestamp.
+async fn download(http: &reqwest::Client, id: String) -> Result<Script> {
     let url = format!("https://www.youtube.com/s/player/{id}/player_ias.vflset/en_US/base.js");
     let response = http
         .get(&url)
@@ -545,5 +550,51 @@ mod tests {
             panic!("a non-player is an error");
         };
         assert!(format!("{error:#}").contains("unexpected structure"));
+    }
+
+    async fn live(id: &str) -> Solver {
+        let script = download(&reqwest::Client::new(), id.to_string())
+            .await
+            .expect("youtube serves the player script");
+        tokio::task::spawn_blocking(move || Solver::start(script, None))
+            .await
+            .expect("the deobfuscator thread joins")
+            .expect("the player script yields a solver")
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads a player script from youtube"]
+    async fn solves_a_player_with_prototype_helpers() {
+        let solved = live("92eef845")
+            .await
+            .solve(None, Some("rYKKd90cGmViBQaX"))
+            .await
+            .expect("the n parameter solves");
+        assert_eq!(solved.n.as_deref(), Some("3tU2ya-IJqhNt"));
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads the current player script from youtube"]
+    async fn solves_the_current_player() {
+        let http = reqwest::Client::new();
+        let id = player_id(&http)
+            .await
+            .expect("the iframe api names a player");
+        let signature: String = ('a'..='z').chain('A'..='Z').chain('0'..='9').collect();
+        let solved = live(&id)
+            .await
+            .solve(Some(&signature), Some("rYKKd90cGmViBQaX"))
+            .await
+            .expect("the current player solves");
+        let sig = solved.sig.expect("a signature comes back");
+        let n = solved.n.expect("an n parameter comes back");
+        assert!(
+            !sig.is_empty() && sig != signature,
+            "player {id} left the signature as it was"
+        );
+        assert!(
+            !n.is_empty() && n != "rYKKd90cGmViBQaX",
+            "player {id} left n as it was"
+        );
     }
 }
