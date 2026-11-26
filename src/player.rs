@@ -330,7 +330,10 @@ impl YtMusic {
         client: Client,
         choice: Choice,
     ) -> Result<(Ciphered, Arc<crate::deobf::Solver>)> {
-        let solver = self.solver().await?;
+        let solver = match choice {
+            Choice::Premium => self.solver_soon().await?,
+            Choice::Itag(_) | Choice::Within(_) => self.solver().await?,
+        };
         log::debug!(
             "player: asking {} for {video_id}, player {} sts {}",
             client.name(),

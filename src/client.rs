@@ -31,6 +31,10 @@ const FLAGS_RETRY: Duration = Duration::from_secs(60);
 /// How long a player script that could not be read is taken as still current before YouTube
 /// is asked again which player it serves.
 const PLAYER_RECHECK: Duration = Duration::from_secs(10 * 60);
+/// How long a Premium stream waits for the solver before the track goes to a client that needs
+/// none. A solver kept in the cache starts in under a second, and preprocessing a new player
+/// script takes far longer than a listener waits for a track.
+const SOLVER_WAIT: Duration = Duration::from_secs(3);
 /// The url a pasted cookie is stored against. A `youtube.com` domain cookie stored here
 /// also matches `www.youtube.com`.
 const COOKIE_ORIGIN: &str = "https://music.youtube.com/";
@@ -68,14 +72,45 @@ impl std::error::Error for NetworkBlocked {}
 /// script that could not be read and when that was last checked.
 enum Deobf {
     Idle,
-    Ready(std::sync::Arc<crate::deobf::Solver>),
+    Ready(Arc<crate::deobf::Solver>),
     Unreadable(crate::deobf::Unreadable, Instant),
+}
+
+impl Deobf {
+    /// What every caller gets without starting anything: the running solver, or the failure
+    /// of a player script found unreadable less than `PLAYER_RECHECK` ago.
+    fn settled(&self) -> Option<Result<Arc<crate::deobf::Solver>>> {
+        match self {
+            Self::Ready(ready) => Some(Ok(ready.clone())),
+            Self::Unreadable(known, checked) if checked.elapsed() < PLAYER_RECHECK => {
+                Some(Err(known.clone().into()))
+            }
+            Self::Unreadable(..) | Self::Idle => None,
+        }
+    }
+}
+
+/// Fetches the current player script and starts a solver over it, skipping the player `known`
+/// names.
+async fn start_solver(
+    http: &reqwest::Client,
+    cache: Option<PathBuf>,
+    known: Option<&crate::deobf::Unreadable>,
+) -> Result<Arc<crate::deobf::Solver>> {
+    let script = crate::deobf::fetch(http, cache.as_deref(), known).await?;
+    let id = script.id.clone();
+    let started = Instant::now();
+    let solver = tokio::task::spawn_blocking(move || crate::deobf::Solver::start(script, cache))
+        .await
+        .context("the deobfuscator did not start")??;
+    log::debug!("deobf: player {id} ready in {:?}", started.elapsed());
+    Ok(Arc::new(solver))
 }
 
 pub struct YtMusic {
     pub(crate) http: reqwest::Client,
     visitor: RwLock<Option<String>>,
-    solver: RwLock<Deobf>,
+    solver: Arc<RwLock<Deobf>>,
     player_cache: Option<PathBuf>,
     authed: Option<Authed>,
     authuser: usize,
@@ -133,7 +168,7 @@ impl YtMusic {
         Self {
             http: reqwest::Client::new(),
             visitor: RwLock::new(None),
-            solver: RwLock::new(Deobf::Idle),
+            solver: Arc::new(RwLock::new(Deobf::Idle)),
             player_cache: None,
             authed: None,
             authuser: 0,
@@ -443,53 +478,50 @@ impl YtMusic {
 
     /// The solver for the player YouTube serves now, started on first use.
     ///
-    /// A player script that cannot be read fails every caller at once with
-    /// [`Unreadable`](crate::deobf::Unreadable) instead of being preprocessed again. Once
-    /// `PLAYER_RECHECK` has passed the next caller asks which player is current, and only a new
-    /// one is tried.
-    pub(crate) async fn solver(&self) -> Result<std::sync::Arc<crate::deobf::Solver>> {
-        if let Deobf::Ready(ready) = &*self.solver.read().await {
-            return Ok(ready.clone());
+    /// The start runs in a task of its own, so a caller that gives up waiting neither stops it
+    /// nor makes the next caller begin again. A player script that cannot be read fails every
+    /// caller at once with [`Unreadable`](crate::deobf::Unreadable) instead of being
+    /// preprocessed again. Once `PLAYER_RECHECK` has passed the next caller asks which player
+    /// is current, and only a new one is tried.
+    pub(crate) async fn solver(&self) -> Result<Arc<crate::deobf::Solver>> {
+        if let Some(settled) = self.solver.read().await.settled() {
+            return settled;
         }
-        let mut slot = self.solver.write().await;
-        let known = match &*slot {
-            Deobf::Ready(ready) => return Ok(ready.clone()),
-            Deobf::Unreadable(known, checked) if checked.elapsed() < PLAYER_RECHECK => {
-                return Err(known.clone().into());
+        let slot = self.solver.clone();
+        let http = self.http.clone();
+        let cache = self.player_cache.clone();
+        tokio::spawn(async move {
+            let mut slot = slot.write_owned().await;
+            if let Some(settled) = slot.settled() {
+                return settled;
             }
-            Deobf::Unreadable(known, _) => Some(known.clone()),
-            Deobf::Idle => None,
-        };
-        match self.start_solver(known.as_ref()).await {
-            Ok(solver) => {
-                *slot = Deobf::Ready(solver.clone());
-                Ok(solver)
-            }
-            Err(error) => {
-                if let Some(unreadable) = error.downcast_ref::<crate::deobf::Unreadable>() {
-                    *slot = Deobf::Unreadable(unreadable.clone(), Instant::now());
+            let known = match &*slot {
+                Deobf::Unreadable(known, _) => Some(known.clone()),
+                Deobf::Idle | Deobf::Ready(_) => None,
+            };
+            match start_solver(&http, cache, known.as_ref()).await {
+                Ok(solver) => {
+                    *slot = Deobf::Ready(solver.clone());
+                    Ok(solver)
                 }
-                Err(error)
+                Err(error) => {
+                    if let Some(unreadable) = error.downcast_ref::<crate::deobf::Unreadable>() {
+                        *slot = Deobf::Unreadable(unreadable.clone(), Instant::now());
+                    }
+                    Err(error)
+                }
             }
-        }
+        })
+        .await
+        .context("the deobfuscator task died")?
     }
 
-    /// Fetches the current player script and starts a solver over it, skipping the player
-    /// `known` names.
-    async fn start_solver(
-        &self,
-        known: Option<&crate::deobf::Unreadable>,
-    ) -> Result<std::sync::Arc<crate::deobf::Solver>> {
-        let cache = self.player_cache.clone();
-        let script = crate::deobf::fetch(&self.http, cache.as_deref(), known).await?;
-        let id = script.id.clone();
-        let started = Instant::now();
-        let solver =
-            tokio::task::spawn_blocking(move || crate::deobf::Solver::start(script, cache))
-                .await
-                .context("the deobfuscator did not start")??;
-        log::debug!("deobf: player {id} ready in {:?}", started.elapsed());
-        Ok(std::sync::Arc::new(solver))
+    /// The solver when it is ready within `SOLVER_WAIT`, for a caller with another way to play
+    /// the track. A start that takes longer goes on for the next caller.
+    pub(crate) async fn solver_soon(&self) -> Result<Arc<crate::deobf::Solver>> {
+        tokio::time::timeout(SOLVER_WAIT, self.solver())
+            .await
+            .context("the deobfuscator is still starting")?
     }
 
     pub(crate) async fn visitor(&self) -> String {
