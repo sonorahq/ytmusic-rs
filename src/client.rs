@@ -28,6 +28,9 @@ const CONTENT_BINDING: &str = "html5_generate_content_po_token";
 const FLAGS_KEEP: Duration = Duration::from_secs(60 * 60);
 /// How long a failed reading of the flags stands before the page is tried again.
 const FLAGS_RETRY: Duration = Duration::from_secs(60);
+/// How long a player script that could not be read is taken as still current before YouTube
+/// is asked again which player it serves.
+const PLAYER_RECHECK: Duration = Duration::from_secs(10 * 60);
 /// The url a pasted cookie is stored against. A `youtube.com` domain cookie stored here
 /// also matches `www.youtube.com`.
 const COOKIE_ORIGIN: &str = "https://music.youtube.com/";
@@ -61,10 +64,18 @@ impl std::fmt::Display for NetworkBlocked {
 
 impl std::error::Error for NetworkBlocked {}
 
+/// What the client knows about the deobfuscator: nothing yet, a running solver, or a player
+/// script that could not be read and when that was last checked.
+enum Deobf {
+    Idle,
+    Ready(std::sync::Arc<crate::deobf::Solver>),
+    Unreadable(crate::deobf::Unreadable, Instant),
+}
+
 pub struct YtMusic {
     pub(crate) http: reqwest::Client,
     visitor: RwLock<Option<String>>,
-    solver: RwLock<Option<std::sync::Arc<crate::deobf::Solver>>>,
+    solver: RwLock<Deobf>,
     player_cache: Option<PathBuf>,
     authed: Option<Authed>,
     authuser: usize,
@@ -122,7 +133,7 @@ impl YtMusic {
         Self {
             http: reqwest::Client::new(),
             visitor: RwLock::new(None),
-            solver: RwLock::new(None),
+            solver: RwLock::new(Deobf::Idle),
             player_cache: None,
             authed: None,
             authuser: 0,
@@ -430,26 +441,55 @@ impl YtMusic {
         &self.http
     }
 
+    /// The solver for the player YouTube serves now, started on first use.
+    ///
+    /// A player script that cannot be read fails every caller at once with
+    /// [`Unreadable`](crate::deobf::Unreadable) instead of being preprocessed again. Once
+    /// `PLAYER_RECHECK` has passed the next caller asks which player is current, and only a new
+    /// one is tried.
     pub(crate) async fn solver(&self) -> Result<std::sync::Arc<crate::deobf::Solver>> {
-        if let Some(ready) = self.solver.read().await.clone() {
-            return Ok(ready);
+        if let Deobf::Ready(ready) = &*self.solver.read().await {
+            return Ok(ready.clone());
         }
         let mut slot = self.solver.write().await;
-        if let Some(ready) = slot.clone() {
-            return Ok(ready);
+        let known = match &*slot {
+            Deobf::Ready(ready) => return Ok(ready.clone()),
+            Deobf::Unreadable(known, checked) if checked.elapsed() < PLAYER_RECHECK => {
+                return Err(known.clone().into());
+            }
+            Deobf::Unreadable(known, _) => Some(known.clone()),
+            Deobf::Idle => None,
+        };
+        match self.start_solver(known.as_ref()).await {
+            Ok(solver) => {
+                *slot = Deobf::Ready(solver.clone());
+                Ok(solver)
+            }
+            Err(error) => {
+                if let Some(unreadable) = error.downcast_ref::<crate::deobf::Unreadable>() {
+                    *slot = Deobf::Unreadable(unreadable.clone(), Instant::now());
+                }
+                Err(error)
+            }
         }
+    }
+
+    /// Fetches the current player script and starts a solver over it, skipping the player
+    /// `known` names.
+    async fn start_solver(
+        &self,
+        known: Option<&crate::deobf::Unreadable>,
+    ) -> Result<std::sync::Arc<crate::deobf::Solver>> {
         let cache = self.player_cache.clone();
-        let script = crate::deobf::fetch(&self.http, cache.as_deref()).await?;
+        let script = crate::deobf::fetch(&self.http, cache.as_deref(), known).await?;
         let id = script.id.clone();
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let solver =
             tokio::task::spawn_blocking(move || crate::deobf::Solver::start(script, cache))
                 .await
                 .context("the deobfuscator did not start")??;
         log::debug!("deobf: player {id} ready in {:?}", started.elapsed());
-        let solver = std::sync::Arc::new(solver);
-        *slot = Some(solver.clone());
-        Ok(solver)
+        Ok(std::sync::Arc::new(solver))
     }
 
     pub(crate) async fn visitor(&self) -> String {

@@ -29,7 +29,26 @@ struct Kept {
     sts: u32,
     bundle: String,
     code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unreadable: Option<String>,
 }
+
+/// A player script this solver cannot turn into working signature and n functions, and why.
+/// The same script fails the same way every time, so a caller that sees this should stop
+/// trying until YouTube names another player.
+#[derive(Clone, Debug)]
+pub struct Unreadable {
+    pub id: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for Unreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "player {} cannot be read: {}", self.id, self.reason)
+    }
+}
+
+impl std::error::Error for Unreadable {}
 
 fn bundle() -> &'static str {
     static BUNDLE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
@@ -134,6 +153,8 @@ fn serve(
     }
 }
 
+/// Builds the runtime that answers challenges for `script`. A script that does not yield a
+/// solver fails with [`Unreadable`], and the cache remembers that for the next start.
 fn prepare(script: &Script, cache: Option<&Path>) -> Result<rquickjs::Context> {
     match script.prepared {
         true => log::debug!("deobf: starting a quickjs runtime for the cached solver"),
@@ -146,7 +167,7 @@ fn prepare(script: &Script, cache: Option<&Path>) -> Result<rquickjs::Context> {
     runtime.set_max_stack_size(JS_STACK);
     runtime.set_memory_limit(MEMORY);
     let context = rquickjs::Context::full(&runtime).context("cannot build the js context")?;
-    context.with(|ctx| {
+    let installed = context.with(|ctx| {
         let sources = match script.prepared {
             true => [Some(("prelude", PRELUDE)), None, None, None],
             false => [
@@ -173,7 +194,7 @@ fn prepare(script: &Script, cache: Option<&Path>) -> Result<rquickjs::Context> {
                     .eval(PREPROCESS)
                     .map_err(|error| report(&ctx, error))
                     .context("cannot read the player script")?;
-                keep(cache, script, &solver);
+                keep(cache, script, &solver, None);
                 solver
             }
         };
@@ -186,12 +207,23 @@ fn prepare(script: &Script, cache: Option<&Path>) -> Result<rquickjs::Context> {
             .map_err(|error| report(&ctx, error))
             .context("cannot install the solver")?;
         Ok::<_, anyhow::Error>(())
-    })?;
+    });
+    if let Err(error) = installed {
+        let reason = format!("{error:#}");
+        keep(cache, script, "", Some(&reason));
+        return Err(Unreadable {
+            id: script.id.clone(),
+            reason,
+        }
+        .into());
+    }
     runtime.run_gc();
     Ok(context)
 }
 
-fn keep(cache: Option<&Path>, script: &Script, solver: &str) {
+/// Writes what came of `script` to the cache: its solver, or with `unreadable` the reason it
+/// has none.
+fn keep(cache: Option<&Path>, script: &Script, solver: &str, unreadable: Option<&str>) {
     let Some(path) = cache else {
         return;
     };
@@ -200,6 +232,7 @@ fn keep(cache: Option<&Path>, script: &Script, solver: &str) {
         sts: script.sts,
         bundle: bundle().to_string(),
         code: solver.to_owned(),
+        unreadable: unreadable.map(str::to_owned),
     };
     if let Err(error) = store(path, &kept) {
         log::warn!("deobf: cannot cache player {}: {error:#}", script.id);
@@ -318,9 +351,24 @@ const RUN: &str = r#"
 })()
 "#;
 
-pub async fn fetch(http: &reqwest::Client, cache: Option<&Path>) -> Result<Script> {
+/// The script of the player YouTube serves now, from the cache when it holds that player.
+///
+/// Fails with [`Unreadable`] without downloading anything when the player is the one `known`
+/// names, or one the cache recorded as unreadable.
+pub async fn fetch(
+    http: &reqwest::Client,
+    cache: Option<&Path>,
+    known: Option<&Unreadable>,
+) -> Result<Script> {
     let id = player_id(http).await?;
+    if let Some(known) = known.filter(|known| known.id == id) {
+        return Err(known.clone().into());
+    }
     if let Some(kept) = kept(cache, &id) {
+        if let Some(reason) = kept.unreadable {
+            log::debug!("deobf: the cache says player {id} cannot be read");
+            return Err(Unreadable { id, reason }.into());
+        }
         log::debug!(
             "deobf: player {id} read from the cache, {} bytes",
             kept.code.len()
@@ -443,6 +491,7 @@ mod tests {
             sts: 20675,
             bundle: bundle.into(),
             code: "var x=1".into(),
+            unreadable: None,
         };
         std::fs::write(path, serde_json::to_vec(&stored).expect("encodes")).expect("writes");
     }
@@ -550,6 +599,26 @@ mod tests {
             panic!("a non-player is an error");
         };
         assert!(format!("{error:#}").contains("unexpected structure"));
+        assert!(error.is::<Unreadable>());
+    }
+
+    #[test]
+    fn remembers_a_player_it_cannot_read() {
+        let path = std::env::temp_dir().join("ytmusic-player-unreadable.json");
+        let script = Script {
+            id: "broken".into(),
+            sts: 1,
+            code: "var x=1".into(),
+            prepared: false,
+        };
+        assert!(Solver::start(script, Some(path.clone())).is_err());
+        let found = kept(Some(&path), "broken").expect("the failure is cached");
+        assert!(
+            found
+                .unreadable
+                .is_some_and(|reason| reason.contains("unexpected structure"))
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     async fn live(id: &str) -> Solver {
